@@ -1,28 +1,39 @@
 import os
 from dotenv import load_dotenv
 import requests
-import time
+import tempfile
+import sounddevice as sd
+import soundfile as sf
 from audio_capture import record_audio, transcribe_audio
-from elevenlabs.client import ElevenLabs
-from elevenlabs import play
+from deepgram import DeepgramClient
+from deepgram.clients.speak.v1 import SpeakOptions
 
 load_dotenv()
 
-# Initialize ElevenLabs client
-el_client = ElevenLabs(api_key=os.environ.get("ELEVENLABS_API_KEY"))
+# Initialize Deepgram client
+deepgram = DeepgramClient(api_key=os.environ.get("DEEPGRAM_API_KEY"))
 
 def speak(text):
-    """Interviewer speaks the response using ElevenLabs."""
+    """Interviewer speaks the response using Deepgram TTS."""
     print(f"\n[Interviewer]: {text}")
     try:
-        audio = el_client.generate(
-            text=text,
-            voice="George", # Professional male voice
-            model="eleven_multilingual_v2"
+        options = SpeakOptions(
+            model="aura-2-aries-en",   # Natural English voice — swap to aura-orion-en for male
         )
-        play(audio)
+        # Write audio to a temp file then play it
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        deepgram.speak.v("1").save(tmp_path, {"text": text}, options)
+
+        data, fs = sf.read(tmp_path)
+        sd.play(data, fs)
+        sd.wait()
     except Exception as e:
-        print(f"[TTS Error - Is your API key set?]: {e}")
+        print(f"[TTS Error - check DEEPGRAM_API_KEY]: {e}")
+    finally:
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 def run_integrated_session(api_base_url="http://localhost:8000"):
     print("=== AI Interview Assistant (Integrated Voice + Backend) ===")

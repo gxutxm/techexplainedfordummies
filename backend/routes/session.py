@@ -3,7 +3,7 @@ routes/session.py — All Session Endpoints
 ==========================================
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File
 from schemas import (
     StartSessionRequest, StartSessionResponse,
     MessageRequest, MessageResponse,
@@ -11,6 +11,7 @@ from schemas import (
 )
 import session_store
 from agents import interviewer, evaluator
+from file_parser import extract_text
 
 router = APIRouter(prefix="/session", tags=["session"])
 
@@ -35,6 +36,28 @@ async def start_session(body: StartSessionRequest):
     first_question = interviewer.get_first_question(body.source_text.strip())
 
     # Save agent's first message to transcript
+    session_store.append_turn(session.session_id, role="assistant", content=first_question)
+
+    return StartSessionResponse(
+        session_id=session.session_id,
+        first_question=first_question,
+    )
+
+
+@router.post("/start-from-file", response_model=StartSessionResponse)
+async def start_session_from_file(file: UploadFile = File(...)):
+    """
+    Create a new interview session from an uploaded file.
+    Accepts PDF, DOCX, PPTX, or TXT.
+    Extracts the text and feeds it into the interviewer — same as /start.
+    """
+    source_text = await extract_text(file)
+
+    if len(source_text.strip()) < 20:
+        raise HTTPException(status_code=422, detail="Not enough text could be extracted from the file.")
+
+    session = session_store.create_session(source_text=source_text.strip())
+    first_question = interviewer.get_first_question(source_text.strip())
     session_store.append_turn(session.session_id, role="assistant", content=first_question)
 
     return StartSessionResponse(
