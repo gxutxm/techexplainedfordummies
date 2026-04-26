@@ -1,63 +1,229 @@
-from audio_capture import record_audio, transcribe_audio
-from agents import interviewer_agent, evaluator_agent
-from dotenv import load_dotenv
 import os
+import sys
+from dotenv import load_dotenv
+
+# Add backend to path so we can import its modules directly
+# This allows us to use the shared backend logic without a separate server process
+backend_path = os.path.join(os.path.dirname(__file__), 'backend')
+if backend_path not in sys.path:
+    sys.path.append(backend_path)
+
+import session_store
+import file_parser
+from agents import interviewer, evaluator
+from audio_capture import record_audio, transcribe_audio
+import tempfile
+import json
+import sounddevice as sd
+import soundfile as sf
+from deepgram import DeepgramClient
+from deepgram.clients.speak.v1 import SpeakOptions
+
+# Load environment variables (API keys)
+load_dotenv()
+
+# Initialize Deepgram client
+deepgram = DeepgramClient(api_key=os.environ.get("DEEPGRAM_API_KEY"))
+
+def speak(text):
+    """Interviewer speaks the response using Deepgram TTS."""
+    print(f"\n[Interviewer]: {text}")
+    try:
+        options = SpeakOptions(
+            model="aura-orion-en", # Professional male voice
+        )
+        
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        deepgram.speak.v("1").save(tmp_path, {"text": text}, options)
+
+        data, fs = sf.read(tmp_path)
+        sd.play(data, fs)
+        sd.wait()
+    except Exception as e:
+        print(f"[TTS Error - check DEEPGRAM_API_KEY]: {e}")
+    finally:
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+def load_profiles():
+    profile_path = os.path.join(backend_path, 'agents', 'interviewer_profiles.json')
+    with open(profile_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
 
 def main():
-    # Load environment variables
-    load_dotenv()
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        print("Error: ANTHROPIC_API_KEY not found in environment variables.")
-        print("Please create a .env file and add your Anthropic API key.")
-        return
-
-    print("="*50)
-    print("      AI Interview Assistant (Voice Enabled)      ")
-    print("="*50)
+    print("="*60)
+    print("      AI Interview Assistant (Integrated Voice Mode)      ")
+    print("="*60)
     
-    print("\nWelcome! Please provide a brief context or abstract for your technical presentation.")
-    context = input("Context: ")
+    profiles = load_profiles()
+    profile_keys = list(profiles.keys())
     
-    print("\nGreat! Let's start the interview. The Executive Interviewer will ask you a question.")
-    print("You will have a few turns to speak.")
-    
-    num_turns = 3
-    conversation_history = []
-    
-    for turn in range(num_turns):
-        print(f"\n{'-'*20} Turn {turn + 1}/{num_turns} {'-'*20}")
+    print("\nAvailable Interviewer Profiles:")
+    for i, key in enumerate(profile_keys, 1):
+        print(f"{i}. {profiles[key]['name']} - {profiles[key]['description']}")
         
-        # 1. Record and transcribe candidate's answer
-        input("\nPress Enter to start recording (10 seconds)...")
-        audio, fs = record_audio(duration=10)
+    while True:
+        try:
+            choice = input(f"\nSelect a profile (1-{len(profile_keys)}):\n> ")
+            profile_idx = int(choice) - 1
+            if 0 <= profile_idx < len(profile_keys):
+                selected_profile_key = profile_keys[profile_idx]
+                selected_profile = profiles[selected_profile_key]
+                break
+            else:
+                print(f"Invalid choice, please select a number between 1 and {len(profile_keys)}.")
+        except ValueError:
+            print("Please enter a valid number.")
+
+    system_prompt = f"""You are acting as the following persona: {selected_profile['name']}
+{selected_profile['description']}
+
+Role details:
+{selected_profile['evaluation_prompt']}
+
+Your job in this interview:
+- Probe for clarity based on your persona.
+- Ask ONE short, focused follow-up question at a time.
+- Keep your responses SHORT (2–4 sentences max): a brief reaction + one question.
+- Never summarize or repeat back what was said at length.
+- Do NOT use bullet points, numbered lists, or headers.
+- Sound natural and conversational, like a real person speaking.
+"""
+
+    print(f"\nWelcome! I'll act as a {selected_profile['name']} interviewing you about your project.")
+    
+    input_choice = input(
+        "\nChoose input method:\n"
+        "1. Type abstract manually\n"
+        "2. Upload file (PDF / DOCX / PPTX / TXT)\n"
+        "Enter 1 or 2:\n> "
+    ).strip()
+
+    if input_choice == "2":
+        file_path = input("\nEnter full file path:\n> ").strip()
+
+        if not os.path.exists(file_path):
+            print("Error: File not found.")
+            return
+
+        print("\n[Parsing file...]")
+        try:
+            with open(file_path, "rb") as f:
+                contents = f.read()
+                
+            ext = file_parser._get_extension(file_path)
+            if ext == ".pdf":
+                context = file_parser._parse_pdf(contents)
+            elif ext == ".docx":
+                context = file_parser._parse_docx(contents)
+            elif ext == ".pptx":
+                context = file_parser._parse_pptx(contents)
+            elif ext == ".txt":
+                context = contents.decode("utf-8", errors="ignore").strip()
+            else:
+                print(f"Error: Unsupported file type '{ext}'. Supported: .pdf, .docx, .pptx, .txt")
+                return
+        except Exception as e:
+            print(f"Error parsing file: {str(e)}")
+            return
+            
+        if not context or len(context.strip()) < 20:
+            print("Error: Extracted text is too short or empty. Please provide a more detailed document.")
+            return
+    else:
+        context = input("\nPlease provide a brief context or abstract for your presentation:\n> ")
+        
+        if not context or len(context.strip()) < 20:
+            print("Please provide a more detailed abstract to begin.")
+            return
+
+    # 1. Initialize a session using the backend logic
+    session = session_store.create_session(source_text=context.strip())
+    session_id = session.session_id
+    
+    # 2. Get the opening question
+    print("\n[Interviewer is reviewing your abstract...]")
+    first_question = interviewer.get_first_question(context.strip(), system_prompt=system_prompt)
+    session_store.append_turn(session_id, role="assistant", content=first_question)
+    
+    # Speak the opening
+    speak(first_question)
+    
+    while True:
+        # 3. Capture user's spoken answer
+        # 3. Capture user's spoken answer
+        audio, fs = record_audio(duration=60)
         candidate_text = transcribe_audio(audio, fs)
         
-        print(f"\n[Candidate (You)]: {candidate_text}")
+        print(f"\n[You]: {candidate_text}")
+        
         if not candidate_text:
-            print("No speech detected. Please try again.")
+            print("I didn't catch that. Could you please repeat?")
             continue
             
-        # 2. Get interviewer's response
+        # 4. Save turn to session history
+        session_store.append_turn(session_id, role="user", content=candidate_text)
+        
+        # 5. Check if the interview is ready to wrap up
+        current_session = session_store.get_session(session_id)
+        if interviewer.is_interview_complete(current_session.turn_count):
+            break
+            
+        # 6. Get next follow-up question
         print("\n[Interviewer thinking...]")
-        interviewer_reply = interviewer_agent(context, candidate_text, conversation_history)
-        print(f"\n[Interviewer]: {interviewer_reply}")
+        # Convert transcript to dict list for the agent
+        transcript_data = [msg.model_dump() if hasattr(msg, 'model_dump') else msg.dict() for msg in current_session.transcript]
         
-        # 3. Update history
-        conversation_history.append({"role": "user", "content": candidate_text})
-        conversation_history.append({"role": "assistant", "content": interviewer_reply})
+        agent_reply = interviewer.get_next_question(
+            source_text=context,
+            transcript=transcript_data,
+            turn_count=current_session.turn_count,
+            system_prompt=system_prompt
+        )
         
-    print("\n" + "="*50)
+        session_store.append_turn(session_id, role="assistant", content=agent_reply)
+        speak(agent_reply)
+
+    # 7. Final Closing Remark
+    current_session = session_store.get_session(session_id)
+    transcript_data = [msg.model_dump() if hasattr(msg, 'model_dump') else msg.dict() for msg in current_session.transcript]
+    
+    closing_remark = interviewer.get_next_question(
+        source_text=context,
+        transcript=transcript_data,
+        turn_count=current_session.turn_count,
+        system_prompt=system_prompt
+    )
+    speak(closing_remark)
+    
+    print("\n" + "="*60)
     print("                Interview Complete!               ")
-    print("="*50)
+    print("="*60)
     
+    # 8. Generate Evaluator Feedback
     print("\nGenerating feedback from the Evaluator Agent...")
+    feedback = evaluator.evaluate_transcript(
+        source_text=context,
+        transcript=current_session.transcript
+    )
     
-    # Evaluate the transcript
-    feedback = evaluator_agent(conversation_history)
-    print("\n" + "="*50)
-    print("                Evaluator Feedback                ")
-    print("="*50 + "\n")
-    print(feedback)
+    print("\n" + "="*45)
+    print("          COMMUNICATION FEEDBACK          ")
+    print("="*45)
+    print(f"Clarity:      {feedback.clarity}/10")
+    print(f"Tone:         {feedback.tone}/10")
+    print(f"Jargon Score: {feedback.jargon_score}/10")
+    
+    if feedback.jargon_terms:
+        print("\nJargon detected:")
+        for item in feedback.jargon_terms:
+            print(f"- '{item.term}': try '{item.suggestion}'")
+            
+    print(f"\nSummary: {feedback.summary}")
+    print(f"Top Tip: {feedback.top_fix}")
+    print("="*45 + "\n")
 
 if __name__ == "__main__":
     main()

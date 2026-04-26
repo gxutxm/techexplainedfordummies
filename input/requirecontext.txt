@@ -1,0 +1,9 @@
+The Ankylosaurus magniventris is a large, quadrupedal, herbivorous dinosaur classified within Kingdom Animalia, Phylum Chordata, Clade Dinosauria, Clade Ornithischia, Suborder Thyreophora, Infraorder Ankylosauria, and Family Ankylosauridae. It lived during the Late Cretaceous (Maastrichtian stage, ~68–66 Ma).
+
+Morphologically, *A. magniventris* exhibits extensive dermal ossifications (osteodermata) forming a continuous integumentary armor system. These include scuta and scutella, composed of compact bone with vascularized cores. The caudal terminus forms a specialized caudal club (osteodermal knob) supported by modified distal caudal vertebrae (vertebrae caudales) with ossified tendons, functioning as an anti-predatory structure against large theropods such as Tyrannosaurus rex.
+
+The cranium is dorsoventrally flattened and triangular, with dermal cranial ornamentation including fused osteoderms. Dentition consists of small foliaceous teeth with marginal denticles, adapted for orthal shearing mastication of fibrous angiosperms and gymnosperms. The narial passages (cavum nasi) are complex and convoluted, possibly contributing to thermoregulatory heat exchange or acoustic resonance.
+
+Postcranially, *A. magniventris* possesses robust appendicular skeleton elements, including columnar humeri and femora, indicating graviportal locomotion. The stance is obligately quadrupedal, with limited cursorial capacity. Fossil specimens are primarily recovered from the Hell Creek Formation (Upper Cretaceous, North America), suggesting habitation in alluvial floodplain ecosystems with mixed vegetation.
+
+Functionally, *Ankylosaurus magniventris* represents a highly derived ankylosaurid exhibiting both passive defense (osteodermal armor) and active defense (caudal club biomechanics), illustrating an advanced evolutionary strategy within Ornithischian anti-predator adaptations.
