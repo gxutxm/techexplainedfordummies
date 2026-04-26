@@ -13,12 +13,18 @@ const PROFILES = [
   { id: "elevator_pitch", name: "Time-Pressed Listener", desc: "Evaluates brevity and clarity in short explanations." },
 ]
 
+// ─── API FUNCTIONS ────────────────────────────────────────────────────────────
+
 async function apiStartSession(text, persona) {
   const res = await fetch("http://localhost:8000/session/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ source_text: text, persona })
   })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Server error ${res.status}`)
+  }
   return res.json()
 }
 
@@ -29,6 +35,10 @@ async function apiStartFromFile(file) {
     method: "POST",
     body: formData
   })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Server error ${res.status}`)
+  }
   return res.json()
 }
 
@@ -38,6 +48,10 @@ async function apiSendMessage(sessionId, content) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId, user_message: content })
   })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Server error ${res.status}`)
+  }
   return res.json()
 }
 
@@ -46,7 +60,46 @@ async function apiEvaluate(sessionId) {
     method: "POST",
     headers: { "Content-Type": "application/json" }
   })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Server error ${res.status}`)
+  }
   return res.json()
+}
+
+async function apiTranscribe(blob) {
+  const formData = new FormData()
+  formData.append("file", blob, "recording.webm")
+  const res = await fetch("http://localhost:8000/session/transcribe", {
+    method: "POST",
+    body: formData
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.detail || `Transcription error ${res.status}`)
+  }
+  return res.json()  // { text: "..." }
+}
+
+// ─── TTS helpers ──────────────────────────────────────────────────────────────
+// apiTTS fetches audio bytes from the backend Deepgram endpoint.
+// playAudio creates a blob URL and plays it — no extra libraries needed.
+
+async function apiTTS(text) {
+  const res = await fetch("http://localhost:8000/session/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text })
+  })
+  if (!res.ok) throw new Error("TTS request failed")
+  return res.blob()   // raw WAV bytes
+}
+
+function playAudio(blob) {
+  const url = URL.createObjectURL(blob)
+  const audio = new Audio(url)
+  audio.onended = () => URL.revokeObjectURL(url)   // clean up after playback
+  audio.play().catch(() => {})                      // ignore autoplay policy silently
 }
 
 const sf = "-apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif"
@@ -95,8 +148,10 @@ export default function App() {
       setSessionId(res.session_id)
       setMessages([{ role: "ai", content: res.first_question }])
       setScreen("chat")
+      // Speak the opening question via Deepgram
+      apiTTS(res.first_question).then(playAudio).catch(() => {})
     } catch (e) {
-      setError("Could not connect to backend. Is the server running?")
+      setError(e.message || "Could not connect to backend. Is the server running?")
     }
     setLoading(false)
   }
@@ -110,8 +165,10 @@ export default function App() {
     try {
       const res = await apiSendMessage(sessionId, input)
       setMessages(m => [...m, { role: "ai", content: res.agent_reply }])
+      // Speak the agent reply via Deepgram
+      apiTTS(res.agent_reply).then(playAudio).catch(() => {})
     } catch (e) {
-      setMessages(m => [...m, { role: "ai", content: "⚠️ Error reaching backend." }])
+      setMessages(m => [...m, { role: "ai", content: `⚠️ ${e.message || "Error reaching backend."}` }])
     }
     setLoading(false)
   }
@@ -130,14 +187,8 @@ export default function App() {
       mediaRecorder.ondataavailable = e => chunks.push(e.data)
       mediaRecorder.onstop = async () => {
         const blob = new Blob(chunks, { type: "audio/webm" })
-        const formData = new FormData()
-        formData.append("file", blob, "recording.webm")
         try {
-          const res = await fetch("http://localhost:8000/transcribe", {
-            method: "POST",
-            body: formData
-          })
-          const data = await res.json()
+          const data = await apiTranscribe(blob)
           if (data.text) setInput(data.text)
         } catch {
           setInput("⚠️ Transcription failed — type instead.")
@@ -162,12 +213,13 @@ export default function App() {
         scores: [
           { label: "Clarity", value: res.clarity },
           { label: "Tone", value: res.tone },
+          { label: "Jargon", value: res.jargon_score },
         ]
       }
       setReport(report)
       setScreen("report")
     } catch (e) {
-      setError("Could not generate report. Is the server running?")
+      setError(e.message || "Could not generate report. Is the server running?")
     }
     setLoading(false)
   }
@@ -368,7 +420,7 @@ const s = {
   chatLog: { background:"rgba(255,255,255,0.7)", backdropFilter:"blur(20px)", borderRadius:20, padding:20, marginBottom:24, display:"flex", flexDirection:"column", gap:10, maxHeight:300, overflowY:"auto" },
   logAi: { alignSelf:"flex-start", background:"#f5f5f7", borderRadius:"14px 14px 14px 4px", padding:"10px 14px", fontSize:13, color:"#1d1d1f", maxWidth:"85%", lineHeight:1.5 },
   logUser: { alignSelf:"flex-end", background:"#0071e3", borderRadius:"14px 14px 4px 14px", padding:"10px 14px", fontSize:13, color:"#fff", maxWidth:"85%", lineHeight:1.5 },
-  reportGrid: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:8 },
+  reportGrid: { display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:12, marginBottom:8 },
   metric: { background:"rgba(255,255,255,0.7)", backdropFilter:"blur(20px)", borderRadius:16, padding:"18px 20px" },
   metricLabel: { fontSize:11, color:"#6e6e73", fontWeight:600, marginBottom:8, letterSpacing:"0.05em" },
   metricVal: { fontSize:32, fontWeight:700, color:"#1d1d1f", letterSpacing:"-0.5px" },

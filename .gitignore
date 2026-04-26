@@ -91,3 +91,17 @@ logs/
 .env.local
 secrets.json
 credentials.json
+# --- Frontend ---
+node_modules/
+dist/
+.vite/
+*.log
+.env.local
+.DS_Store
+
+# --- Python (already partially ignored — these are belts-and-braces) ---
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
