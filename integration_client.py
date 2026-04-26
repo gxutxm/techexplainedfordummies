@@ -1,17 +1,28 @@
-import pyttsx3
+import os
+from dotenv import load_dotenv
 import requests
 import time
 from audio_capture import record_audio, transcribe_audio
+from elevenlabs.client import ElevenLabs
+from elevenlabs import play
 
-# Initialize TTS engine for the Interviewer's voice
-engine = pyttsx3.init()
-engine.setProperty('rate', 160) # Natural speaking pace
+load_dotenv()
+
+# Initialize ElevenLabs client
+el_client = ElevenLabs(api_key=os.environ.get("ELEVENLABS_API_KEY"))
 
 def speak(text):
-    """Interviewer speaks the response."""
+    """Interviewer speaks the response using ElevenLabs."""
     print(f"\n[Interviewer]: {text}")
-    engine.say(text)
-    engine.runAndWait()
+    try:
+        audio = el_client.generate(
+            text=text,
+            voice="George", # Professional male voice
+            model="eleven_multilingual_v2"
+        )
+        play(audio)
+    except Exception as e:
+        print(f"[TTS Error - Is your API key set?]: {e}")
 
 def run_integrated_session(api_base_url="http://localhost:8000"):
     print("=== AI Interview Assistant (Integrated Voice + Backend) ===")

@@ -6,3 +6,7 @@ anthropic
 python-dotenv
 requests
 pyttsx3
+fastapi
+uvicorn
+groq
+pydantic
