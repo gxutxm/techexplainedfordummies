@@ -1,132 +1,252 @@
 """
 agents/evaluator.py — Evaluator Agent
 ======================================
-⚠️  THIS FILE IS OWNED BY PAIR B.
-Pair A created the stub and the JSON schema. Pair B implements the logic.
+Owned by: Pair B / Person 1
 
-The evaluator reads the full interview transcript and scores the presenter
-on clarity, tone, and jargon usage.
+Reads the full interview transcript and scores the presenter on three
+dimensions: clarity, tone, and jargon usage. Returns structured JSON
+feedback that the React report screen renders.
 
-Expected output JSON shape (must match schemas.py EvaluateResponse exactly):
+Behavior contract:
+  - Calls Claude with temperature=0 for deterministic JSON output.
+  - On malformed JSON, retries once with a stricter prompt.
+  - On second failure, raises HTTPException(502) — the route surfaces it
+    cleanly instead of returning fake/fallback scores.
+
+Output shape (must match schemas.EvaluateResponse exactly):
 {
-  "clarity": 1-10,
-  "tone": 1-10,
-  "jargon_score": 1-10,
-  "jargon_terms": [
-    { "term": "<jargon word>", "suggestion": "<plain English alternative>" }
-  ],
-  "summary": "2-3 sentence overall summary of how the presenter did.",
-  "top_fix": "Single most impactful improvement the presenter should make."
+  "clarity":      int 1-10,
+  "tone":         int 1-10,
+  "jargon_score": int 1-10,
+  "jargon_terms": [{ "term": str, "suggestion": str }],
+  "summary":      str  (2-3 sentences),
+  "top_fix":      str  (single most impactful improvement)
 }
 """
 
 import json
+import logging
+import re
+
+from fastapi import HTTPException
+
 import llm_client
 from config import EVALUATOR_MODEL, MAX_TOKENS
 from schemas import EvaluateResponse, JargonTerm
+
+log = logging.getLogger(__name__)
+
+
+# ─── System Prompt ────────────────────────────────────────────────────────────
 
 EVALUATOR_SYSTEM_PROMPT = """You are an expert communication coach evaluating how well someone explained a technical topic to a non-technical executive audience.
 
 You will receive:
 1. The original source text (abstract or presentation) the interviewee was asked about
-2. A full transcript of the interview
+2. A full transcript of the interview between an executive (assistant) and a presenter (user)
 
-Your job is to evaluate ONLY the interviewee's responses (the "user" turns) on three dimensions:
+Your job is to evaluate ONLY the PRESENTER'S responses (the "user" turns) on three dimensions.
 
-CLARITY (1–10):
-- 10 = Explanations are crisp, concrete, and immediately understandable
-- 1 = Vague, confusing, or impossible to follow without domain knowledge
+═══════════════════════════════════════════════════════════════
+SCORING RUBRIC (each 1–10)
+═══════════════════════════════════════════════════════════════
 
-TONE (1–10):
-- 10 = Confident, warm, engaging — perfect for an executive audience
-- 1 = Defensive, robotic, overly academic, or dismissive
+CLARITY — How easy was it to follow the presenter's answers?
+  1–3: Confusing, jumped between ideas, assumed knowledge the executive didn't have
+  4–6: Followable but had unclear moments or missing context
+  7–8: Clear structure, used analogies or concrete examples, built ideas progressively
+  9–10: Exceptionally clear; a smart non-expert would walk away genuinely understanding
 
-JARGON SCORE (1–10):
-- 10 = Zero unnecessary jargon — every term is explained or avoided
-- 1 = Heavy jargon used without explanation, audience would be lost
+TONE — Was the presenter's tone right for an executive audience?
+  1–3: Condescending, dismissive, defensive, or overly academic
+  4–6: Neutral but flat; didn't engage the executive
+  7–8: Confident, respectful, conversational
+  9–10: Warm, engaging, made the executive feel smart for asking
 
-Also identify any specific jargon terms the interviewee used without explaining,
-and suggest a plain-English alternative for each.
+JARGON_SCORE — How well did the presenter avoid or explain technical jargon? HIGHER = LESS JARGON (better)
+  1–3: Heavy unexplained jargon throughout
+  4–6: Some jargon used but inconsistently explained
+  7–8: Mostly plain language; jargon explained when used
+  9–10: Almost no unexplained jargon; technical terms always defined in context
 
-You MUST respond with ONLY valid JSON — no preamble, no markdown, no backticks.
-The JSON must exactly match this shape:
+═══════════════════════════════════════════════════════════════
+JARGON_TERMS
+═══════════════════════════════════════════════════════════════
+Identify up to 5 specific phrases the presenter used WITHOUT adequate explanation
+that an executive would not understand. For each, provide a plain-English rewrite.
+
+If the presenter explained their jargon well throughout, return an empty list — do
+not invent problems that weren't there.
+
+═══════════════════════════════════════════════════════════════
+SUMMARY & TOP_FIX
+═══════════════════════════════════════════════════════════════
+SUMMARY: 2–3 sentences addressed to the presenter as "you". Honest but constructive.
+TOP_FIX: The single most impactful change they could make, one sentence.
+
+═══════════════════════════════════════════════════════════════
+OUTPUT FORMAT — CRITICAL
+═══════════════════════════════════════════════════════════════
+Return ONLY a valid JSON object. No markdown. No code fences. No preamble.
+No explanation. Just the JSON.
+
+Match this exact shape:
+
 {
   "clarity": <int 1-10>,
   "tone": <int 1-10>,
   "jargon_score": <int 1-10>,
   "jargon_terms": [
-    { "term": "<term>", "suggestion": "<plain English>" }
+    {"term": "<exact phrase the presenter said>", "suggestion": "<plain-language rewrite>"}
   ],
-  "summary": "<2-3 sentences summarizing overall communication effectiveness>",
-  "top_fix": "<single most impactful improvement>"
+  "summary": "<2-3 sentences, plain prose, addressed to the presenter as 'you'>",
+  "top_fix": "<single most impactful change, one sentence>"
 }
 """
 
 
+# Used only on the retry attempt — appended to the user message
+_RETRY_SUFFIX = (
+    "\n\n[CRITICAL] Your previous response was not valid JSON. "
+    "Return ONLY a JSON object with NO other text, NO markdown fences, "
+    "NO explanation, and NO preamble. Just the raw JSON."
+)
+
+
+# ─── Public API ───────────────────────────────────────────────────────────────
+
 def evaluate_transcript(source_text: str, transcript: list) -> EvaluateResponse:
     """
-    Evaluates the full interview transcript and returns structured feedback.
-    Retries once if Claude returns malformed JSON.
+    Evaluate the full interview transcript and return structured feedback.
+
+    Calls Claude up to twice — once normally, once with a stricter retry prompt
+    if the first response wasn't parseable JSON. Raises HTTPException(502) if
+    both attempts fail rather than returning meaningless fallback scores.
     """
     transcript_text = _format_transcript(transcript)
+    user_message = _build_user_message(source_text, transcript_text)
 
-    user_message = (
+    # ── First attempt ───────────────────────────────
+    raw = _call_claude(user_message)
+    parsed = _try_parse(raw)
+    if parsed is not None:
+        return parsed
+
+    log.warning("Evaluator: first response was not valid JSON, retrying once. Raw head: %r", raw[:200])
+
+    # ── Retry with stricter prompt ──────────────────
+    raw_retry = _call_claude(user_message + _RETRY_SUFFIX)
+    parsed_retry = _try_parse(raw_retry)
+    if parsed_retry is not None:
+        return parsed_retry
+
+    log.error("Evaluator: failed twice. Last raw head: %r", raw_retry[:300])
+    raise HTTPException(
+        status_code=502,
+        detail="The evaluator returned malformed JSON twice. Please try again in a moment.",
+    )
+
+
+# ─── Internals ────────────────────────────────────────────────────────────────
+
+def _build_user_message(source_text: str, transcript_text: str) -> str:
+    return (
         f"SOURCE TEXT (what the presenter was asked about):\n"
         f"---\n{source_text}\n---\n\n"
         f"INTERVIEW TRANSCRIPT:\n"
         f"---\n{transcript_text}\n---\n\n"
-        f"Please evaluate the presenter's communication and return ONLY the JSON object."
+        f"Evaluate the presenter's communication and return ONLY the JSON object."
     )
-
-    raw = _call_claude(user_message)
-    return _parse_response(raw)
 
 
 def _call_claude(user_message: str) -> str:
+    """
+    Single call to the LLM client. Uses temperature=0 for deterministic JSON.
+    Trusts llm_client to route to whichever provider config.py specifies.
+    """
     return llm_client.chat(
         system=EVALUATOR_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
         model=EVALUATOR_MODEL,
         max_tokens=MAX_TOKENS["evaluator"],
+        temperature=0.0,
     )
 
 
-def _parse_response(raw: str) -> EvaluateResponse:
+def _try_parse(raw: str) -> EvaluateResponse | None:
     """
-    Parse Claude's JSON response. Strips markdown fences if present.
-    Retries with a stricter prompt if parsing fails.
+    Try to coerce Claude's response into an EvaluateResponse. Returns None on
+    failure rather than raising — caller decides what to do (retry or 502).
     """
-    # Strip potential markdown code fences
-    clean = raw.replace("```json", "").replace("```", "").strip()
+    if not raw:
+        return None
+
+    extracted = _extract_json(raw)
+    try:
+        data = json.loads(extracted)
+    except json.JSONDecodeError as e:
+        log.debug("Evaluator JSON decode failed: %s. Extracted: %r", e, extracted[:300])
+        return None
 
     try:
-        data = json.loads(clean)
-        jargon_terms = [
-            JargonTerm(term=j["term"], suggestion=j["suggestion"])
-            for j in data.get("jargon_terms", [])
-        ]
         return EvaluateResponse(
-            clarity=data["clarity"],
-            tone=data["tone"],
-            jargon_score=data["jargon_score"],
-            jargon_terms=jargon_terms,
-            summary=data["summary"],
-            top_fix=data["top_fix"],
+            clarity=_clamp_score(data["clarity"]),
+            tone=_clamp_score(data["tone"]),
+            jargon_score=_clamp_score(data["jargon_score"]),
+            jargon_terms=[
+                JargonTerm(term=str(j["term"]).strip(), suggestion=str(j["suggestion"]).strip())
+                for j in data.get("jargon_terms", [])
+                if isinstance(j, dict) and j.get("term") and j.get("suggestion")
+            ][:5],  # Cap at 5 to keep the report focused
+            summary=str(data["summary"]).strip(),
+            top_fix=str(data["top_fix"]).strip(),
         )
-    except (json.JSONDecodeError, KeyError) as e:
-        # Return a safe fallback rather than crashing the whole request
-        return EvaluateResponse(
-            clarity=5,
-            tone=5,
-            jargon_score=5,
-            jargon_terms=[],
-            summary="Evaluation could not be parsed. Please try again.",
-            top_fix="Re-run evaluation.",
-        )
+    except (KeyError, TypeError, ValueError) as e:
+        log.debug("Evaluator schema validation failed: %s. Data: %r", e, data)
+        return None
+
+
+def _extract_json(text: str) -> str:
+    """
+    Robust JSON extraction. Handles three common Claude failure modes:
+      1. Markdown code fences:        ```json\n{...}\n```
+      2. Preamble text:               "Here's your evaluation: {...}"
+      3. Trailing text after JSON:    "{...} Hope this helps!"
+
+    Strategy: strip fences, then take everything between the first '{' and
+    last '}'. Crude but effective.
+    """
+    text = text.strip()
+
+    # Strip markdown fences (```json or ```)
+    text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+    text = re.sub(r"\n?```\s*$", "", text)
+    text = text.strip()
+
+    # Slice between outermost braces — handles preamble/postamble
+    first = text.find("{")
+    last = text.rfind("}")
+    if first != -1 and last > first:
+        return text[first : last + 1]
+
+    return text  # Let json.loads fail informatively
+
+
+def _clamp_score(value) -> int:
+    """Coerce score to int and clamp to [1, 10]. Defensive against Claude
+    occasionally returning floats or out-of-range values."""
+    try:
+        v = int(round(float(value)))
+    except (TypeError, ValueError):
+        v = 5
+    return max(1, min(10, v))
 
 
 def _format_transcript(transcript: list) -> str:
-    """Turn the transcript list into a readable string for the prompt."""
+    """Turn the transcript list into a labeled, readable string for the prompt.
+
+    Accepts both dicts and Pydantic models (the route may pass either).
+    """
     lines = []
     for entry in transcript:
         role = entry.role if hasattr(entry, "role") else entry["role"]
