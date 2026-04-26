@@ -143,37 +143,31 @@ Your job in this interview:
     session = session_store.create_session(source_text=context.strip())
     session_id = session.session_id
     
-    # 2. Get the opening question
-    print("\n[Interviewer is reviewing your abstract...]")
-    first_question = interviewer.get_first_question(context.strip(), system_prompt=system_prompt)
-    session_store.append_turn(session_id, role="assistant", content=first_question)
+    # 2. START FLOW: Request user's initial explanation
+    print("\n" + "-"*40)
+    print("READY: Please provide your initial explanation or pitch now.")
+    print("-"*40)
     
-    # Speak the opening
-    speak(first_question)
+    audio, fs = record_audio(duration=60)
+    initial_pitch = transcribe_audio(audio, fs)
     
+    if not initial_pitch:
+        print("No audio detected. Exiting.")
+        return
+
+    print(f"\n[You]: {initial_pitch}")
+    session_store.append_turn(session_id, role="user", content=initial_pitch)
+
+    # 3. Main Interview Loop
     while True:
-        # 3. Capture user's spoken answer
-        # 3. Capture user's spoken answer
-        audio, fs = record_audio(duration=60)
-        candidate_text = transcribe_audio(audio, fs)
-        
-        print(f"\n[You]: {candidate_text}")
-        
-        if not candidate_text:
-            print("I didn't catch that. Could you please repeat?")
-            continue
-            
-        # 4. Save turn to session history
-        session_store.append_turn(session_id, role="user", content=candidate_text)
-        
-        # 5. Check if the interview is ready to wrap up
         current_session = session_store.get_session(session_id)
+        
+        # Check if interview is complete (based on turn count)
         if interviewer.is_interview_complete(current_session.turn_count):
             break
             
-        # 6. Get next follow-up question
+        # Get next follow-up question from AI based on the last user turn
         print("\n[Interviewer thinking...]")
-        # Convert transcript to dict list for the agent
         transcript_data = [msg.model_dump() if hasattr(msg, 'model_dump') else msg.dict() for msg in current_session.transcript]
         
         agent_reply = interviewer.get_next_question(
@@ -186,7 +180,20 @@ Your job in this interview:
         session_store.append_turn(session_id, role="assistant", content=agent_reply)
         speak(agent_reply)
 
-    # 7. Final Closing Remark
+        # Capture user's response to the AI's question
+        audio, fs = record_audio(duration=60)
+        candidate_text = transcribe_audio(audio, fs)
+        
+        print(f"\n[You]: {candidate_text}")
+        
+        if not candidate_text:
+            print("I didn't catch that. Could you please repeat?")
+            # Force a retry by not appending a turn and looping back
+            continue
+            
+        session_store.append_turn(session_id, role="user", content=candidate_text)
+
+    # 4. Final Closing Remark
     current_session = session_store.get_session(session_id)
     transcript_data = [msg.model_dump() if hasattr(msg, 'model_dump') else msg.dict() for msg in current_session.transcript]
     
