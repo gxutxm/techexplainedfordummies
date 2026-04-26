@@ -81,6 +81,7 @@ data/
 *.csv
 *.json
 *.parquet
+*.wav
 
 # Logs
 *.log
