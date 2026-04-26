@@ -4,3 +4,5 @@ soundfile
 numpy
 anthropic
 python-dotenv
+requests
+pyttsx3
