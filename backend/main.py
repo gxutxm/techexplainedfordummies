@@ -58,7 +58,14 @@ async def get_samples():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    import llm_client
+    from config import INTERVIEWER_MODEL, EVALUATOR_MODEL
+    return {
+        "status": "ok",
+        "provider": llm_client.current_provider(),
+        "interviewer_model": INTERVIEWER_MODEL,
+        "evaluator_model": EVALUATOR_MODEL,
+    }
 
 
 # ─── Global Error Handler ─────────────────────────────────────────────────────

@@ -11,15 +11,11 @@ Behavior:
 - After MAX_TURNS, wraps up the interview gracefully
 """
 
-import os
-import json
-import anthropic
 from typing import List, Dict
-
-client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+import llm_client
+from config import INTERVIEWER_MODEL, MAX_TOKENS
 
 MAX_TURNS = 6  # Number of user responses before the interview ends
-MODEL = "claude-sonnet-4-20250514"
 
 SYSTEM_PROMPT = """You are a senior non-technical executive (C-suite level) conducting a follow-up interview with someone who just presented a technical project or research paper to you.
 
@@ -99,14 +95,12 @@ def get_first_question(source_text: str) -> str:
         }
     ]
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=300,
+    return llm_client.chat(
         system=SYSTEM_PROMPT,
         messages=messages,
+        model=INTERVIEWER_MODEL,
+        max_tokens=MAX_TOKENS["interviewer"],
     )
-
-    return response.content[0].text.strip()
 
 
 def get_next_question(source_text: str, transcript: list, turn_count: int) -> str:
@@ -129,14 +123,12 @@ def get_next_question(source_text: str, transcript: list, turn_count: int) -> st
             )
         })
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=300,
+    return llm_client.chat(
         system=SYSTEM_PROMPT,
         messages=messages,
+        model=INTERVIEWER_MODEL,
+        max_tokens=MAX_TOKENS["interviewer"],
     )
-
-    return response.content[0].text.strip()
 
 
 def is_interview_complete(turn_count: int) -> bool:

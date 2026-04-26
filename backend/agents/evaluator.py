@@ -20,14 +20,10 @@ Expected output JSON shape (must match schemas.py EvaluateResponse exactly):
 }
 """
 
-import os
 import json
-import anthropic
-from typing import List, Dict
+import llm_client
+from config import EVALUATOR_MODEL, MAX_TOKENS
 from schemas import EvaluateResponse, JargonTerm
-
-client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
-MODEL = "claude-sonnet-4-20250514"
 
 EVALUATOR_SYSTEM_PROMPT = """You are an expert communication coach evaluating how well someone explained a technical topic to a non-technical executive audience.
 
@@ -86,14 +82,13 @@ def evaluate_transcript(source_text: str, transcript: list) -> EvaluateResponse:
     return _parse_response(raw)
 
 
-def _call_claude(user_message: str, retry: bool = True) -> str:
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=1000,
+def _call_claude(user_message: str) -> str:
+    return llm_client.chat(
         system=EVALUATOR_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
+        model=EVALUATOR_MODEL,
+        max_tokens=MAX_TOKENS["evaluator"],
     )
-    return response.content[0].text.strip()
 
 
 def _parse_response(raw: str) -> EvaluateResponse:
