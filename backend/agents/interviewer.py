@@ -79,7 +79,7 @@ def build_messages(source_text: str, transcript: List[Dict]) -> List[Dict]:
     return messages
 
 
-def get_first_question(source_text: str) -> str:
+def get_first_question(source_text: str, system_prompt: str = SYSTEM_PROMPT) -> str:
     """
     Called when a session starts. Returns the agent's opening question.
     """
@@ -96,14 +96,14 @@ def get_first_question(source_text: str) -> str:
     ]
 
     return llm_client.chat(
-        system=SYSTEM_PROMPT,
+        system=system_prompt,
         messages=messages,
         model=INTERVIEWER_MODEL,
         max_tokens=MAX_TOKENS["interviewer"],
     )
 
 
-def get_next_question(source_text: str, transcript: list, turn_count: int) -> str:
+def get_next_question(source_text: str, transcript: list, turn_count: int, system_prompt: str = SYSTEM_PROMPT) -> str:
     """
     Called after each user reply. Returns the agent's next question.
     If turn_count >= MAX_TURNS, the agent wraps up instead of asking more.
@@ -124,7 +124,7 @@ def get_next_question(source_text: str, transcript: list, turn_count: int) -> st
         })
 
     return llm_client.chat(
-        system=SYSTEM_PROMPT,
+        system=system_prompt,
         messages=messages,
         model=INTERVIEWER_MODEL,
         max_tokens=MAX_TOKENS["interviewer"],

@@ -4,13 +4,50 @@ import whisper
 import tempfile
 import os
 
-def record_audio(duration=10, fs=16000):
-    print(f"\n[Microphone] Recording for {duration} seconds... Speak now!")
-    # Capture audio using sounddevice
-    recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='float32')
-    sd.wait() # Wait for the recording to finish
-    print("[Microphone] Recording finished.")
-    return recording, fs
+import queue
+import threading
+import sys
+import numpy as np
+
+def record_audio(duration=60, fs=16000):
+    print(f"\n[Microphone] Press Enter to START recording...")
+    input()
+    print(f"[Microphone] Recording started (max {duration}s)... Press Enter to STOP.")
+    
+    q = queue.Queue()
+    def callback(indata, frames, time, status):
+        if status:
+            print(status, file=sys.stderr)
+        q.put(indata.copy())
+
+    stop_event = threading.Event()
+    
+    def wait_for_input():
+        input()
+        stop_event.set()
+        
+    t = threading.Thread(target=wait_for_input)
+    t.daemon = True
+    t.start()
+    
+    try:
+        with sd.InputStream(samplerate=fs, channels=1, dtype='float32', callback=callback):
+            stop_event.wait(timeout=duration)
+            
+        audio_data = []
+        while not q.empty():
+            audio_data.append(q.get())
+            
+        if audio_data:
+            recording = np.concatenate(audio_data, axis=0)
+        else:
+            recording = np.zeros((0, 1), dtype='float32')
+            
+        print("[Microphone] Recording stopped.")
+        return recording, fs
+    except Exception as e:
+        print(f"[Microphone Error]: {e}")
+        return np.zeros((0, 1), dtype='float32'), fs
 
 def transcribe_audio(audio_data, fs, model_size="base"):
     print(f"\n[Whisper] Loading model '{model_size}' and transcribing...")
